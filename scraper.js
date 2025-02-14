@@ -9,7 +9,6 @@ export const scrapeCharacterDialogues = async (character, url) => {
     const $ = cheerio.load(data);
     const dialogues = [];
 
-    // Example for IMSDb structure - customize this part according to the page
     const lines = $('td.scrtext').text().split('\n');
 
     lines.forEach((line, index) => {
@@ -19,7 +18,7 @@ export const scrapeCharacterDialogues = async (character, url) => {
           dialogues.push({
             character,
             dialogue: cleanText(nextLine),
-            user_message: null // This is the key fix!
+            user_message: null
           });
         }
       }
