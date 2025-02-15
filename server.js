@@ -2,16 +2,16 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import axios from "axios";
-import mongoose from "mongoose";
-import Dialogue from "./Dialogue.js";
-import { scrapeCharacterDialogues } from "./scraper.js";
+import { scrapeCharacterDialogues } from "./scripts/scraper.js";
+import { insertDialogue, searchDialogue } from "./config/Dialogue.js";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const MONGO_URI = process.env.MONGO_URI;
 
 // Character prompt templates
 const characterPrompts = {
@@ -36,133 +36,83 @@ const characterPrompts = {
     Keep responses concise and engaging.`
 };
 
-// Connect to MongoDB
-const connectDB = async () => {
-  try {
-    await mongoose.connect(MONGO_URI);
-    console.log("✅ MongoDB Connected");
-  } catch (err) {
-    console.error("❌ MongoDB Connection Error:", err);
-    process.exit(1);
-  }
-};
-
-connectDB();
-
-// Rate limiting
-const rateLimit = {
-  windowMs: 60 * 1000,
-  max: new Map(),
-  limit: 20
-};
+const rateLimitMap = new Map();
+const rateLimit = { windowMs: 60 * 1000, limit: 20 };
 
 const rateLimiter = (req, res, next) => {
   const ip = req.ip;
-  const current = rateLimit.max.get(ip) || 0;
-  
-  if (current >= rateLimit.limit) {
+  const currentTime = Date.now();
+  const requestLog = rateLimitMap.get(ip) || [];
+
+  const recentRequests = requestLog.filter(timestamp => currentTime - timestamp < rateLimit.windowMs);
+
+  if (recentRequests.length >= rateLimit.limit) {
     return res.status(429).json({ error: "Too many requests. Please try again later." });
   }
-  
-  rateLimit.max.set(ip, current + 1);
-  setTimeout(() => rateLimit.max.set(ip, (rateLimit.max.get(ip) || 1) - 1), rateLimit.windowMs);
-  
+
+  recentRequests.push(currentTime);
+  rateLimitMap.set(ip, recentRequests);
+
   next();
 };
 
 app.use(rateLimiter);
 
+// Generate Gemini Response Function
+const generateGeminiResponse = async (prompt, userMessage) => {
+  try {
+    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+    const result = await model.generateContent(`${prompt}\nUser: ${userMessage}`);
+    const responseText = result.response.text();
+
+    return responseText.trim();
+  } catch (error) {
+    console.error("Gemini API Error:", error.message);
+    throw error;
+  }
+};
+
 // Chat endpoint
 app.post("/chat", async (req, res) => {
-  try {
-    const { character, user_message } = req.body;
+  const {character, user_message} = req.body;
 
-    if (!character || !user_message) {
-      return res.status(400).json({ error: "Character and message are required" });
-    }
-
-    if (user_message.length > 500) {
-      return res.status(400).json({ error: "Message too long. Please keep under 500 characters." });
-    }
-
-    // Try to find existing dialogue
-    const existingDialogue = await Dialogue.findOne({
-      character,
-      user_message: { $regex: new RegExp(user_message, "i") }
-    });
-
-    if (existingDialogue) {
-      return res.json({ 
-        response: existingDialogue.dialogue,
-        source: "database"
-      });
-    }
-
-    // Generate AI response
-    const prompt = characterPrompts[character] || 
-      characterPrompts._default.replace("{CHARACTER_NAME}", character);
-
-    const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        contents: [
-          { 
-            role: "user", 
-            parts: [{ text: `${prompt}\n\nUser: ${user_message}` }] 
-          }
-        ],
-        generationConfig: {
-          temperature: 0.9,
-          maxOutputTokens: 150
-        }
-      }
-    );
-
-    const reply = response.data.candidates[0]?.content?.parts[0]?.text || 
-      "I don't know what to say.";
-
-    // Save to database
-    await new Dialogue({
-      character,
-      user_message,
-      dialogue: reply
-    }).save();
-
-    res.json({ 
-      response: reply,
-      source: "ai"
-    });
-
-  } catch (error) {
-    console.error("Error:", error);
-    res.status(500).json({ error: "Something went wrong" });
+  if (!character || !user_message) {
+    return res.status(400).json({ error: "Character and user_message are required" });
   }
-});
+
+  try {
+    const foundDialogue = await searchDialogue(user_message);
+
+    if (foundDialogue) {
+      return res.json({response: foundDialogue.dialogue, source: "weaviate"})
+    }
+
+    const prompt = characterPrompts[character] || characterPrompts._default.replace("{CHARACTER_NAME}", character)
+    const aiResponse = await generateGeminiResponse(prompt, user_message);
+
+    await insertDialogue(character, aiResponse, user_message)
+
+    return res.json({response: aiResponse, source: "ai"})
+  }
+  catch(error) {
+    console.log("error in the chat route while finding or creating response ", error)
+  }
+})
 
 // Scrape endpoint
-app.post("/scrape", async (req, res) => {
-  try {
-    const { character, url } = req.body;
-    
-    if (!character || !url) {
-      return res.status(400).json({ error: "Character and URL are required" });
-    }
+app.post('/scrape', async (req, res) => {
+  const { character, url } = req.body;
 
+  try {
     const dialogues = await scrapeCharacterDialogues(character, url);
-    res.json({ success: true, count: dialogues.length });
+    console.log('Scraped Dialogues Count:', dialogues.length);
+    res.status(200).json({ message: 'Scraping successful', dialogues });
   } catch (error) {
-    console.error("Scrape Error:", error);
-    res.status(500).json({ error: "Scraping failed" });
+    console.error('Scrape Error:', error);
+    res.status(500).json({ error: 'Scraping failed' });
   }
 });
 
-// Health check
-app.get("/health", (req, res) => {
-  res.json({ 
-    status: "ok",
-    mongodb: mongoose.connection.readyState === 1
-  });
-});
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
