@@ -48,7 +48,7 @@ export const scrapeCharacterDialogues = async (character, url) => {
     }
 
     console.log(`✅ Scraping finished. Collected ${dialogues.length} dialogues.`);
-    return dialogues; // This is the important part!
+    return dialogues;
   } catch (error) {
     console.error('❌ Error during scraping:', error);
     throw error;

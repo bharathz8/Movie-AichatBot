@@ -74,30 +74,45 @@ const generateGeminiResponse = async (prompt, userMessage) => {
 
 // Chat endpoint
 app.post("/chat", async (req, res) => {
-  const {character, user_message} = req.body;
+  const { character, user_message } = req.body;
 
   if (!character || !user_message) {
-    return res.status(400).json({ error: "Character and user_message are required" });
+      return res.status(400).json({ error: "Character and user_message are required" });
   }
 
   try {
-    const foundDialogue = await searchDialogue(user_message);
+      // First try to find existing dialogue
+      const foundDialogue = await searchDialogue(character, user_message);
 
-    if (foundDialogue) {
-      return res.json({response: foundDialogue.dialogue, source: "weaviate"})
-    }
+      if (foundDialogue) {
+          console.log(`Found existing dialogue for character ${character}`);
+          return res.json({
+              response: foundDialogue.dialogue,
+              source: "weaviate"
+          });
+      }
 
-    const prompt = characterPrompts[character] || characterPrompts._default.replace("{CHARACTER_NAME}", character)
-    const aiResponse = await generateGeminiResponse(prompt, user_message);
+      // If no existing dialogue, generate new response
+      console.log(`Generating new AI response for character ${character}`);
+      const prompt = characterPrompts[character] || 
+                    characterPrompts._default.replace("{CHARACTER_NAME}", character);
+      const aiResponse = await generateGeminiResponse(prompt, user_message);
 
-    await insertDialogue(character, aiResponse, user_message)
+      // Store the new response
+      await insertDialogue(character, aiResponse, user_message);
 
-    return res.json({response: aiResponse, source: "ai"})
+      return res.json({
+          response: aiResponse,
+          source: "ai"
+      });
+  } catch (error) {
+      console.error("Error in chat route:", error);
+      return res.status(500).json({ 
+          error: "Internal server error",
+          details: error.message 
+      });
   }
-  catch(error) {
-    console.log("error in the chat route while finding or creating response ", error)
-  }
-})
+});
 
 // Scrape endpoint
 app.post('/scrape', async (req, res) => {
